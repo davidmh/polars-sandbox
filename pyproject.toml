@@ -1,0 +1,10 @@
+[project]
+name = "polars-sandbox"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "docopt>=0.6.2",
+    "polars>=1.31.0",
+]

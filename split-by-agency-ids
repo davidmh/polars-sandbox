@@ -1,0 +1,209 @@
+#!/usr/bin/env python
+
+"""Split a GTFS file using a list of agency ids.
+
+Usage:
+  split-by-agency-ids -i <input-gtfs.zip> --ids STRING
+
+Options:
+  -i, --input PATH     path to the input GTFS file
+  --ids STRING         a comma-separated list of agency-ids
+"""
+
+import os
+import shutil
+import tempfile
+import polars as pl
+from docopt import docopt
+import zipfile
+
+OUTPUT_DIR = "/tmp/gtfs/"
+
+# Ensure output directory exists
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+GTFS_SCHEMAS = {
+    "agency.txt": {
+        "agency_id": pl.String(),
+        "agency_name": pl.String(),
+        "agency_url": pl.String(),
+        "agency_timezone": pl.String(),
+        "agency_lang": pl.String(),
+        "agency_phone": pl.String(),
+        "agency_fare_url": pl.String(),
+        "agency_email": pl.String(),
+    },
+    "routes.txt": {
+        "route_id": pl.String(),
+        "agency_id": pl.String(),
+        "route_short_name": pl.String(),
+        "route_long_name": pl.String(),
+        "route_desc": pl.String(),
+        "route_type": pl.Int64(),
+        "route_url": pl.String(),
+        "route_color": pl.String(),
+        "route_text_color": pl.String(),
+        "route_sort_order": pl.Int64(),
+        "continuous_pickup": pl.Int64(),
+        "continuous_drop_off": pl.Int64(),
+        "network_id": pl.String(),
+    },
+    "trips.txt": {
+        "route_id": pl.String(),
+        "service_id": pl.String(),
+        "trip_id": pl.String(),
+        "trip_headsign": pl.String(),
+        "trip_short_name": pl.String(),
+        "direction_id": pl.Int64(),
+        "block_id": pl.String(),
+        "shape_id": pl.String(),
+        "wheelchair_accessible": pl.Int64(),
+        "bikes_allowed": pl.Int64(),
+    },
+    "stop_times.txt": {
+        "trip_id": pl.String(),
+        "departure_time": pl.String(),
+        "arrival_time": pl.String(),
+        "stop_id": pl.String(),
+        "location_group_id": pl.String(),
+        "location_id": pl.String(),
+        "stop_sequence": pl.Int64(),
+        "stop_headsign": pl.String(),
+        "start_pickup_drop_off_window": pl.String(),
+        "end_pickup_drop_off_window": pl.String(),
+        "pickup_type": pl.Int64(),
+        "drop_off_type": pl.Int64(),
+        "continuous_pickup": pl.Int64(),
+        "continuous_drop_off": pl.Int64(),
+        "shape_dist_traveled": pl.Float64(),
+        "timepoint": pl.Int64(),
+        "pickup_booking_rule_id": pl.String(),
+        "drop_off_booking_rule_id": pl.String(),
+    },
+    "stops.txt": {
+        "stop_id": pl.String(),
+        "stop_code": pl.String(),
+        "stop_name": pl.String(),
+        "tts_stop_name": pl.String(),
+        "stop_desc": pl.String(),
+        "stop_lat": pl.Float64(),
+        "stop_lon": pl.Float64(),
+        "zone_id": pl.String(),
+        "stop_url": pl.String(),
+        "location_type": pl.String(),
+        "parent_station": pl.String(),
+        "stop_timezone": pl.String(),
+        "wheelchair_boarding": pl.String(),
+        "level_id": pl.String(),
+        "platform_code": pl.String(),
+    },
+    "shapes.txt": {
+        "shape_id": pl.String(),
+        "shape_pt_lat": pl.Float64(),
+        "shape_pt_lon": pl.Float64(),
+        "shape_pt_sequence": pl.UInt32(),
+        "shape_dist_traveled": pl.Float64(),
+    },
+    "calendar.txt": {
+        "service_id": pl.String(),
+        "monday": pl.Int64(),
+        "tuesday": pl.Int64(),
+        "wednesday": pl.Int64(),
+        "thursday": pl.Int64(),
+        "friday": pl.Int64(),
+        "saturday": pl.Int64(),
+        "sunday": pl.Int64(),
+        "start_date": pl.String(),
+        "end_date": pl.String(),
+    },
+    "calendar_dates.txt": {
+        "service_id": pl.String(),
+        "date": pl.String(),
+        "exception_type": pl.Enum(["1", "2"]),
+    },
+}
+
+def expand_path(path):
+    return os.path.join(os.path.expanduser(path))
+
+
+def main():
+    args = docopt(__doc__)
+
+    input_path = expand_path(args['--input'])
+    agency_ids = args['--ids'].split(',')
+
+    # Unzip GTFS data
+    print("Unpacking {}...".format(input_path))
+    tmpdir = tempfile.mkdtemp()
+    shutil.unpack_archive(input_path, tmpdir)
+
+    def load_table(filename, schema_overrides):
+        path = os.path.join(tmpdir, filename)
+        return pl.read_csv(path, schema_overrides=schema_overrides, infer_schema=False) if os.path.exists(path) else None
+
+    source_gtfs = {}
+    for file_name, schema in GTFS_SCHEMAS.items():
+        source_gtfs[file_name] = load_table(file_name, schema)
+
+    split_gtfs = {}
+
+    # Filter all the agencies first
+    print("Filtering all the agencies first...")
+    split_gtfs["agency.txt"] = source_gtfs["agency.txt"].filter(pl.col("agency_id").is_in(agency_ids))
+
+    for agency_id in agency_ids:
+        # Filter routes
+        routes = source_gtfs["routes.txt"].filter(pl.col("agency_id") == agency_id)
+        split_gtfs["routes.txt"] = routes
+
+        # Filter trips
+        trips = source_gtfs["trips.txt"].filter(pl.col("route_id").is_in(routes["route_id"].implode()))
+        split_gtfs["trips.txt"] = trips
+
+        # Filter shapes
+        if source_gtfs["shapes.txt"] is not None:
+            split_gtfs["shapes.txt"] = source_gtfs["shapes.txt"].filter(
+                pl.col("shape_id").is_in(trips["shape_id"].implode())
+            )
+
+        # Filter stop_times
+        stop_times = source_gtfs["stop_times.txt"].filter(
+            pl.col("trip_id").is_in(trips["trip_id"].implode())
+        )
+        split_gtfs["stop_times.txt"] = stop_times
+
+        # Filter stops
+        stops = source_gtfs["stops.txt"].filter(
+            pl.col("stop_id").is_in(stop_times["stop_id"].implode())
+        )
+        split_gtfs["stops.txt"] = stops
+
+        # Filter calendar and calendar_dates
+        split_gtfs["calendar.txt"] = source_gtfs["calendar.txt"].filter(
+            pl.col("service_id").is_in(trips["service_id"].implode())
+        ) if source_gtfs["calendar.txt"] is not None else None
+
+        split_gtfs["calendar_dates.txt"] = source_gtfs["calendar_dates.txt"].filter(
+            pl.col("service_id").is_in(trips["service_id"].implode())
+        ) if source_gtfs["calendar_dates.txt"] is not None else None
+
+        # Export split GTFS to a zip
+        agency_zip_path = os.path.join(OUTPUT_DIR, f"{agency_id}.zip")
+
+        with tempfile.TemporaryDirectory() as tmp_out_dir:
+            for file_name, df in split_gtfs.items():
+                if df is not None:
+                    df.write_csv(os.path.join(tmp_out_dir, file_name))
+
+            with zipfile.ZipFile(agency_zip_path, 'w') as zf:
+                print("-> Saving", agency_zip_path)
+                for filename in os.listdir(tmp_out_dir):
+                    zf.write(
+                        os.path.join(tmp_out_dir, filename),
+                        arcname=filename
+                    )
+
+
+if __name__ == "__main__":
+    main()
