@@ -189,20 +189,14 @@ def main():
         ) if source_gtfs["calendar_dates.txt"] is not None else None
 
         # Export split GTFS to a zip
-        agency_zip_path = os.path.join(OUTPUT_DIR, f"{agency_id}.zip")
+        agency_zip_path = os.path.join(OUTPUT_DIR, agency_id)
 
         with tempfile.TemporaryDirectory() as tmp_out_dir:
             for file_name, df in split_gtfs.items():
                 if df is not None:
                     df.write_csv(os.path.join(tmp_out_dir, file_name))
 
-            with zipfile.ZipFile(agency_zip_path, 'w') as zf:
-                print("-> Saving", agency_zip_path)
-                for filename in os.listdir(tmp_out_dir):
-                    zf.write(
-                        os.path.join(tmp_out_dir, filename),
-                        arcname=filename
-                    )
+            shutil.make_archive(agency_zip_path, "zip", tmp_out_dir)
 
 
 if __name__ == "__main__":
